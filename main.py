@@ -10,6 +10,8 @@ rules_attr_name = 'rules'
 logs_device_name = 'log'
 reset_attr_name = 'reset'
 logs_char_device_name = 'fw_log'
+dyn_conns_device_name = 'conns'
+dyn_conns_attr_name = 'conns'
 
 dir_strs = {
 	1:'in',
@@ -42,6 +44,16 @@ ack_strs = {
 	2:'yes',
 	3:'any',
 }
+tcp_state_strs = {
+0:'INVALID',
+1:'SYN_SENT',
+2:'SYN_RECV',
+3:'ESTABLISHED',
+4:'FIN_SENT',
+5:'FIN_RECV',
+6:'CLOSED',
+7:'EXPECTING_INIT',
+}
 
 # Constants
 page_size = resource.getpagesize()
@@ -49,6 +61,7 @@ max_rules = 50
 rule_name_size = 20
 rule_size = 60
 log_size = 28
+dyn_rule_size = 20
 NF_IP_FORWARD = 2
 
 # Helper method to turn an integer into an IPv4 address strings and vice versa
@@ -102,7 +115,13 @@ def load_rules(path):
 				print('Cannot load rule at line \'{0}\', Invalid protocol value'.format(i))
 				return
 			src_port = int(get_key_by_val(port_strs,src_port)[0])
+			if src_port > 1023:
+				print('Cannot load rule at line \'{0}\', Source ports above 1023 aren\'t allowed explicitly'.format(i))
+				return
 			dst_port = int(get_key_by_val(port_strs,dst_port)[0])
+			if dst_port > 1023:
+				print('Cannot load rule at line \'{0}\', Destination ports above 1023 aren\'t allowed explicitly'.format(i))
+				return
 			ack, found  = get_key_by_val(ack_strs,ack)
 			if not found:
 				print('Cannot load rule at line \'{0}\', Invalid ACK bit value'.format(i))
@@ -184,12 +203,43 @@ def show_rules():
 		print('{0} {1} {2} {3} {4} {5} {6} {7} {8}'.format(name,direction,src_ip_str,dst_ip_str,proto_str,src_port,dst_port,ack,action))
 	file_rules.close()
 
+def show_conns():
+	file_conns = open('/sys/class/{0}/{1}/{2}'.format(class_name,dyn_conns_device_name,dyn_conns_attr_name),'r')
+	
+	# Print header
+	print('src_ip\t\tdst_ip\t\t\tsrc_port\tdst_port\tstate')
+
+	# Keep reading from the table device until no more output is available
+	conn_ra = file_conns.read(dyn_rule_size)
+	i = 0
+	while(conn_ra != ''):
+		# Unpack values from the current rule
+		src_ip, dst_ip, src_port, dst_port, _ = struct.unpack('!IIHHH',conn_ra[:14])
+		_, state = struct.unpack('!HB',conn_ra[14:17])
+		src_ip = int2ip(src_ip)
+		dst_ip =  int2ip(dst_ip)
+		if(len(dst_ip) == 7):
+			# Especially short IPs need an extra TAB
+			dst_ip = dst_ip + '\t'
+		if(len(src_ip) == 7):
+			# Especially short IPs need an extra TAB
+			src_ip = src_ip + '\t'
+		state = tcp_state_strs.get(state,state)
+		# print a connection entry
+		print('{0}\t{1}\t\t{2}\t\t{3}\t\t{4}'.format(
+							src_ip, dst_ip,
+							src_port,dst_port,
+							state))	
+		# Get all bytes for the next connection
+		conn_ra = file_conns.read(dyn_rule_size)
+	file_conns.close()
+
 def show_log():
 	file_logs = open('/dev/{0}'.format(logs_char_device_name),'r')
 	
 	# Print header
-	print('timestamp\t\t\tsrc_ip\t\t\tdst_ip\t\t\tsrc_port\tdst_port\tprotocol\thooknum\t\taction\treason\t\t\t\tcount')
-
+	print(('timestamp\t\t\tsrc_ip\t\t\tdst_ip\t\t\tsrc_port\tdst_port\t'
+		'protocol\thooknum\t\taction\treason\t\t\t\tcount'))
 	# Keep reading from log device until no more output is available
 	log_raw = file_logs.read(log_size)
 	i = 0
@@ -226,7 +276,8 @@ def clear_log():
 
 def main(argv):
 	usage_msg ='USAGE python {0} command [rules_path]\n'.format(argv[0])
-	usage_msg += '\tcommand - One of the supported command: show_rules, load_rules, show_log, clear_log\n'
+	usage_msg += ('\tcommand - One of the supported command: show_rules, load_rules, '
+			'show_log, clear_log, show_conns\n')
 	usage_msg += '\trules_path - (Only for \'load_rules\' command) specifies the path to load the rules from'
 	if(len(argv) < 2 or (len(argv) != 3 and argv[1] == 'load_rules')):
 		print(usage_msg)
@@ -245,6 +296,8 @@ def main(argv):
 		pass
 	elif(command == 'clear_log'):
 		clear_log()
+	elif(command == 'show_conns'):
+		show_conns()
 	else:
 		# Invalid command name
 		print(usage_msg)

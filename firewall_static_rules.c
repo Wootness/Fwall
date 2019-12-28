@@ -1,5 +1,5 @@
-#include "fw.h"
-#include "firewall_rules.h"
+#include "firewall_main.h"
+#include "firewall_static_rules.h"
 
 rule_t rules_table[MAX_RULES];
 char active_rules_count = 0;
@@ -51,7 +51,7 @@ int update_rules_table(const char *encoded_rules,int leng)
         memcpy(&temp_port,encoded_rules + offset,2);
         temp_port = ntohs(temp_port);
         if(temp_port > ABOVE_1023_INDICATOR)
-            return RULES_UPDATE_FAIL;
+            return RULES_UPDATE_FAIL;    
         offset += 2;
         //  Dest port:
         memcpy(&temp_port,encoded_rules + offset,2);

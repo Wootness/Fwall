@@ -6,7 +6,7 @@
 #include <linux/device.h>
 #include <asm/uaccess.h>
 #include <linux/types.h>
-#include "fw.h"
+#include "firewall_main.h"
 #include "firewall_log.h"
 
 

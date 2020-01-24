@@ -10,14 +10,10 @@ manip_device_name = 'manipulations'
 manip_attr_name = 'manipulations'
 
 manip_inst_size = 14
-http_manipulation_port = 800
+smtp_manipulation_port = 250
 NO_MANIPULATION_PORT = 0
 MANIPULATION_CMD_INST = 0
-
-HTTP_HEADERS_END = '\r\n\r\n'
-HTTP_CONTENT_LEN_HEADER = 'Content-Length: '
-HTTP_HEADERS_SEPERATOR = '\r\n'
-
+MANIPULATION_CMD_FTP_DATA =1
 
 # Helper method to turn an integer into an IPv4 address strings and vice versa
 # Taken from: https://stackoverflow.com/questions/5619685/conversion-from-ip-string-to-integer-and-backward-in-python
@@ -109,7 +105,7 @@ class Single_user_handler(threading.Thread):
 		# we inform the kernel so it doesn't drop our connection
 		self.server.bind(('0.0.0.0',0))
 		manip_port = self.server.getsockname()[1]
-
+		
 		# Write instructions to kernel	
 		self.client_info = manipulation_inst['client']
 		self.server_info = manipulation_inst['server']
@@ -127,107 +123,80 @@ class Single_user_handler(threading.Thread):
 		self.server.connect((self.server_info['ip'],server_port))
 	
 	def run(self):
-		client_buf = b''						
-		# Start by reading request (maybe in parts) from the client
-		req_sent = False
-		while not HTTP_HEADERS_END in client_buf:
-			temp = self.client.recv(256)
-			if (temp == b''):
-				print('client disconnected!')
-				break
-			client_buf += temp
-		else:
-			# found HTTP request end
-			req_hdr_len = client_buf.index(HTTP_HEADERS_END) + len(HTTP_HEADERS_END)
-			request_hdr = client_buf[:req_hdr_len]
-			print('Client\'s request header found: \033[91m{0}\033[00m'.format(request_hdr.rstrip()))
-			# Finding URI, starts after first space
-			uri_start = request_hdr.lower().index(' ') + 1
-			temp = request_hdr[uri_start:]
-			uri_end = temp.index(HTTP_HEADERS_SEPERATOR)
-			uri = temp[:uri_end]
-			print('Client\'s parsed URL: \033[91m{0}\033[00m'.format(uri.rstrip()))
-			uri = uri.replace('%0d','\r').replace('%2e','.').replace('%2f','/')
-			print('Client\'s decoded (nostromo style) URL: \033[91m{0}\033[00m'.format(uri.replace('\r','\\r').rstrip()))
-			uri = uri.replace('\r','')
-			print('Client\'s decoded (no CRs) URL: \033[91m{0}\033[00m'.format(uri.rstrip()))
-			if '/../' in uri:
-				print('Client\'s request contained a forbidden URI, dropping connection.')
-				self.client.close()
-				self.server.close()
-				return
-			# If we got it, the URI is fine. Figuring request length by content-len (if present)
-			if HTTP_CONTENT_LEN_HEADER in request_hdr:
-				content_len_start = request_hdr.lower().index(HTTP_CONTENT_LEN_HEADER.lower()) + len(HTTP_CONTENT_LEN_HEADER)
-				temp = request_hdr[content_len_start:]
-				content_len_end = temp.index(HTTP_HEADERS_SEPERATOR)
-				content_len = temp[:content_len_end].strip()
-				try:
-					content_len = int(content_len) # Try to cast to int, we might have garbage in this field...
-				except:
-					print('Client\'s request header contained invalid Content-Length field: \'\033[91m{0}\033[00m\', Aborting'.format(content_len))
-					# Couldn't figure entire client's length, dropping connection
-					self.client.close()
-					self.server.close()
-					return
-				while (len(client_buf[req_hdr_len:]) < content_len) :
-					temp = self.client.recv(256)
-					if (temp == b''):
-						print('client disconnected!')
-						self.client.close()
-						self.server.close()
-						return
+		client_buf = b''
+		client_mail_body_buf = b''
+		# using a flag to tell if we are collecting client's data part
+		reading_mail_body = False
+		while(1):
+			# check both sockets for info, whichever is available is processed
+			ready = select.select([self.client,self.server], [], [], 100)
+			if self.client in ready[0]:
+				# Check if client is ready
+				print('Client is Ready ->> Reading!')
+				temp  = self.client.recv(256)
+				if (temp == b''):
+					print('Client disconnected!')
+					break
+					
+				if reading_mail_body :
+					# Aggregating user mail content
+					client_mail_body_buf += temp
+
+					# Check for indication that the data part is ending
+					if '\x0d\x0a.\x0d\x0a' in client_mail_body_buf:
+						msg_len = client_mail_body_buf.index('\x0d\x0a.\x0d\x0a')+5
+						msg = client_mail_body_buf[:msg_len]
+						# Anything left in the buffer goes to the normal client buffer
+						temp = client_mail_body_buf[msg_len:]
+
+						# Check mail content
+						forbidden = run_dlp_analysis(msg)
+						print('Client\'s mail content: \033[91m{0}\033[00m'.format(msg.rstrip()))
+						if(forbidden):
+							print('Client\'s mail contained a forbidden mail content, dropping connection.')
+							self.client.close()
+							self.server.close()
+							return
+						print('Client\'s mail content is OK.')
+						self.server.send(msg)
+						client_mail_body_buf = ''
+
+						# Resetting data aggregation flag
+						reading_mail_body = False
+
+				# Not using an else case so I can 'fall' into that case right after finishing user data part
+				if not reading_mail_body:
 					client_buf += temp
-				# Done collecting HTTP request body, running analysis
-				content = client_buf[req_hdr_len:]
-				forbidden = run_dlp_analysis(content)
-				print('Client\'s HTTP request content: \033[91m{0}\033[00m'.format(content))
-				if(forbidden):
-					print('Client\'s HTTP request contained a forbidden content, dropping connection.')
-					self.client.close()
-					self.server.close()
-					return
-				else:
-					print('Client\'s HTTP request is NOT forbidden!')
+					if not '\x0d\x0a' in client_buf:
+						continue
+					# Else, we have a complete command
+					# Extract command
+					command_len = client_buf.index('\x0d\x0a')+2
+					command = client_buf[:command_len]
 
-			# Collected entire client request: header + (possible) content
-			self.server.send(client_buf)
-			req_sent = True
-		
-		if not req_sent:
-			# ser prematurly disconnected, dropping connection	  
-			self.client.close()
-			self.server.close()
-			return
-		
-		# Request sent, try read response from server
-		server_buf = b''
-		while not HTTP_HEADERS_END in server_buf:
-			temp = self.server.recv(256)
-			if (temp == b''):
-				print('server disconnected!')
-				break
-			server_buf += temp
-		else:
-			# found end of HTTP headers of response
-			res_len = server_buf.index(HTTP_HEADERS_END) + len(HTTP_HEADERS_END)
-			resp = server_buf[:res_len]
-			print('Server\'s response found: \033[96m{0}\033[00m'.format(resp.rstrip()))
+					# Remove command from buffer
+					client_buf = client_buf[command_len:]
 
-			# Sending header than sending any data left
-			self.client.send(server_buf)
-			while 1:
+					# Check if the client is starting it's data part
+					if 'data\x0d\x0a' in command.lower():
+						reading_mail_body = True
+						print('reading_mail_body is NOW TRUEEEE : {0}'.format(reading_mail_body))
+						# Mark for next iteration
+
+					# any non-interesting command (and also PORT commands continue here)
+					print('Client -> Server: \033[91m{0}\033[00m'.format(temp.replace('\x0d','\\r').replace('\x0a','\\n')))
+					self.server.send(command)
+			elif self.server in ready[0]:
+				# Server is ready
+				# just forward anything we can read back to the client
 				temp = self.server.recv(256)
 				if (temp == b''):
-					print('server disconnected!')
+					print('Server disconnected!')
 					break
+				print('Server -> Client: \033[96m{0}\033[00m'.format(temp.rstrip()))
 				self.client.send(temp)
-		print('Closing client')
 		self.client.close()
-		print('Closed client')
-		print('Closing server')
 		self.server.close()
-		print('Closed server')
 
 def run_server(address):
 	listener = socket.socket()
@@ -256,7 +225,7 @@ def run_server(address):
 
 def main(argv):
 	try:
-		run_server(('',http_manipulation_port))
+		run_server(('',smtp_manipulation_port))
 	except Exception as error:
 		print('ERROR: {0}'.format(error))
 		return 1
